@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../Robot-Executive-Dashboard"
+		},
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../../UAS/robocommand-neon"
+		}
+	],
+	"settings": {}
+}

@@ -1,0 +1,160 @@
+#include <Arduino.h>
+#include <ESP32Servo.h>
+
+// ==========================================
+// 1. DEFINISI PIN BERDASARKAN DOKUMEN KRSBI
+// ==========================================
+
+// --- Sub-Sistem Ultrasonik --- [cite: 344]
+const int TRIG_PIN = 5;
+const int ECHO_PIN = 4;
+
+// --- Sub-Sistem Penggerak (L298N #1) --- [cite: 450]
+const int ENA_M1 = 25;
+const int IN1_M1 = 26;
+const int IN2_M1 = 27;
+
+const int IN3_M2 = 14;
+const int IN4_M2 = 12;
+const int ENB_M2 = 13;
+
+// --- Sub-Sistem Penggerak (L298N #2) --- [cite: 453]
+const int ENA_M3 = 32;
+const int IN1_M3 = 33;
+const int IN2_M3 = 35;
+
+// --- Sub-Sistem Penendang (Solenoid) --- [cite: 554]
+const int KICK_PIN = 21;
+
+// --- Sub-Sistem Capitan (Servo) --- [cite: 655]
+const int SERVO_KIRI_PIN = 19;
+const int SERVO_KANAN_PIN = 18;
+
+// ==========================================
+// 2. DEKLARASI OBJEK & VARIABEL
+// ==========================================
+Servo servoKiri;
+Servo servoKanan;
+
+// Konfigurasi PWM LEDC (ESP32) [cite: 478, 479, 480]
+const int freq = 1000;
+const int resolution = 8; // 8-bit (0-255)
+const int pwmM1 = 0;      // Channel 0
+const int pwmM2 = 1;      // Channel 1
+const int pwmM3 = 2;      // Channel 2
+
+// ==========================================
+// 3. FUNGSI SETUP UTAMA
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+
+  // Setup Ultrasonik [cite: 376, 378]
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  // Setup Motor Driver 1 & 2
+  pinMode(IN1_M1, OUTPUT); pinMode(IN2_M1, OUTPUT);
+  pinMode(IN3_M2, OUTPUT); pinMode(IN4_M2, OUTPUT);
+  pinMode(IN1_M3, OUTPUT); pinMode(IN2_M3, OUTPUT);
+
+  // Setup PWM Motor [cite: 490, 491]
+  ledcSetup(pwmM1, freq, resolution); ledcAttachPin(ENA_M1, pwmM1);
+  ledcSetup(pwmM2, freq, resolution); ledcAttachPin(ENB_M2, pwmM2);
+  ledcSetup(pwmM3, freq, resolution); ledcAttachPin(ENA_M3, pwmM3);
+
+  // Setup Solenoid [cite: 589, 590]
+  pinMode(KICK_PIN, OUTPUT);
+  digitalWrite(KICK_PIN, LOW); // Pastikan mati saat awal
+
+  // Setup Servo [cite: 691, 694, 699]
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  servoKiri.setPeriodHertz(50);
+  servoKanan.setPeriodHertz(50);
+  servoKiri.attach(SERVO_KIRI_PIN, 500, 2400);
+  servoKanan.attach(SERVO_KANAN_PIN, 500, 2400);
+
+  Serial.println("=== SISTEM SIAP: MULAI PENGETESAN ===");
+  delay(2000);
+}
+
+// ==========================================
+// 4. MODUL FUNGSI PENGETESAN
+// ==========================================
+
+void testUltrasonik() {
+  Serial.println("-> Test Ultrasonik...");
+  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2); [cite: 388, 389]
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10); [cite: 391, 392]
+  digitalWrite(TRIG_PIN, LOW); [cite: 393]
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); [cite: 395]
+  float distance = duration * 0.034 / 2; [cite: 399]
+
+  Serial.print("Jarak: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+  delay(500);
+}
+
+void testMotor() {
+  Serial.println("-> Test Motor Maju (Kecepatan 50%)...");
+  
+  // Motor 1 Maju
+  digitalWrite(IN1_M1, HIGH); digitalWrite(IN2_M1, LOW);
+  ledcWrite(pwmM1, 128); // 128 dari 255
+  
+  // Motor 2 Maju
+  digitalWrite(IN3_M2, HIGH); digitalWrite(IN4_M2, LOW);
+  ledcWrite(pwmM2, 128);
+
+  // Motor 3 Maju [cite: 497, 498, 499, 504]
+  digitalWrite(IN1_M3, HIGH); digitalWrite(IN2_M3, LOW);
+  ledcWrite(pwmM3, 128);
+
+  delay(2000); // Jalan selama 2 detik
+
+  Serial.println("-> Test Motor Berhenti...");
+  ledcWrite(pwmM1, 0);
+  ledcWrite(pwmM2, 0);
+  ledcWrite(pwmM3, 0); [cite: 508]
+  delay(2000);
+}
+
+void testSolenoid() {
+  Serial.println("-> Test Solenoid: TENDANG!");
+  digitalWrite(KICK_PIN, HIGH); [cite: 609]
+  delay(100); // Tahan 100ms agar dapet tenaga [cite: 610, 611]
+  digitalWrite(KICK_PIN, LOW); [cite: 612]
+  Serial.println("-> Solenoid: KEMBALI");
+  delay(2000);
+}
+
+void testServo() {
+  Serial.println("-> Test Servo: TUTUP Capitan");
+  servoKiri.write(90); [cite: 721]
+  servoKanan.write(90); [cite: 721]
+  delay(2000);
+
+  Serial.println("-> Test Servo: BUKA Capitan");
+  servoKiri.write(0); [cite: 726]
+  servoKanan.write(180); [cite: 728]
+  delay(2000);
+}
+
+// ==========================================
+// 5. MAIN LOOP
+// ==========================================
+void loop() {
+  // SILAKAN UNCOMMENT KOMPONEN YANG INGIN DITEST
+  // Jalankan satu per satu agar hardware aman, terutama untuk Motor dan Solenoid.
+  
+  testUltrasonik();
+  // testServo();
+  // testMotor();
+  // testSolenoid();
+  
+  Serial.println("-----------------------------------");
+  delay(1000);
+}
