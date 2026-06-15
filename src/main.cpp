@@ -1,270 +1,335 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
-#include <ESP32Servo.h>
 
-/*
- * =========================================================================
- * ROBOT KRSBI - FIRMWARE FINAL V1.0 (PRO)
- * =========================================================================
- * - No Bootstrapping Pin Conflicts
- * - 3-Wheel Omni Kinematics
- * - Safety Auto-Capitan Logic
- * - Watchdog Motor Auto-Stop
- * =========================================================================
- */
-
-// 1. WIFI & MQTT CONFIG
-const char* ssid = "neo8";         
+const char* ssid = "neo8";        
 const char* password = "asd123123"; 
-const char* mqtt_server = "broker.hivemq.com";
-const int mqtt_port = 1883;
+const char* mqtt_server = "broker.hivemq.com"; 
 
-// Topics
-const char* topic_drive_vector = "robot/drive/vector";
-const char* topic_drive_rotate = "robot/drive/rotate";
-const char* topic_action_kick = "robot/action/kick";
-const char* topic_action_dribble = "robot/action/dribble";
-const char* topic_status_ultrasonic = "robot/status/ultrasonic";
+const char* topic_gerak = "robot/gerak"; 
+const char* topic_gerak_vector = "robot/gerak/vector";
+const char* topic_gerak_rotate = "robot/gerak/rotate";
+const char* topic_jarak = "robot/jarak";                  
+const char* topic_tendang = "robot/tendang";              
+const char* topic_kecepatan = "robot/kecepatan";          
+const char* topic_speed_L = "robot/kecepatan/kiri";       
+const char* topic_speed_R = "robot/kecepatan/kanan";      
+const char* topic_speed_B = "robot/kecepatan/belakang";   
 
-// 2. PIN ASSIGNMENT (SESUAI WIRING HARDWARE ASLI SAAT INI)
-// ---------------------------------------------------------
-// Motor Kiri (M1) - Pakai Driver 1 (Aman)
-const int ENA_M1 = 25;  
-const int IN1_M1 = 26;  
-const int IN2_M1 = 27;  
-
-// Motor Belakang (M3) - Pakai Driver 1
-const int ENA_M3 = 13;  
-const int IN1_M3 = 14;  // WARNING: Pin 12 adalah MTDI (Bootstrapping). Jika gagal boot, cabut pin ini saat dinyalakan.
-const int IN2_M3 = 12;  
-
-// Motor Kanan (M2) - Pakai Driver 2
-const int ENA_M2 = 4;   
-const int IN1_M2 = 15;  // Dibalik biar crab kanan jalan bener
-const int IN2_M2 = 2;   // Dibalik biar crab kanan jalan bener
-
-// Ultrasonik (Sensor)
-const int TRIG_PIN = 18; // Sesuai lancah.txt asli
-const int ECHO_PIN = 19; 
-
-// Actuators
-const int KICK_PIN = 23;
-const int SERVO_KIRI_PIN = 29;
-const int SERVO_KANAN_PIN = 17; // Dikembalikan ke layout awal yang tidak conflict
-
-// 3. OBJECTS & STATE
 WiFiClient espClient;
 PubSubClient client(espClient);
-Servo servoKiri;
-Servo servoKanan;
 
-// PWM Params
-const int freq = 20000;
-const int res = 8;
-const int chanM1 = 8;
-const int chanM2 = 9;
-const int chanM3 = 10;
+// Function prototypes (biar callback bisa panggil)
+void maju();
+void mundur();
+void serongKiriDepan();
+void serongKananBelakang();
+void serongKananDepan();
+void serongKiriBelakang();
+void putarKanan();
+void putarKiri();
+void geserKanan();
+void geserKiri();
+void berhenti();
+void setup_wifi();
+long getJarak();
+void reconnect();
+void gerakDariVector(float vx, float vy);
 
-// Safety & Tracking
+const int ENA_B = 13; const int IN1_B = 14; const int IN2_B = 12; 
+const int ENA_L = 25; const int IN1_L = 27; const int IN2_L = 26; 
+const int ENA_R = 4;  const int IN1_R = 2;  const int IN2_R = 15; 
+
+const int trigPin = 18;
+const int echoPin = 19;
+
+const int pinSolenoid = 23; 
+
+int speedL = 255; 
+int speedR = 255; 
+int speedB = 255; 
+const int freq = 30000;
+const int resolution = 8;
+const int chanL = 0;
+const int chanR = 1;
+const int chanB = 2;
+
+unsigned long lastJarakTime = 0;
+
+bool sedangMenendang = false;
+unsigned long waktuMulaiTendang = 0;
+const int durasiTendang = 500;
 unsigned long lastCmdTime = 0;
-unsigned long lastTeleTime = 0;
-bool capitanTerbuka = true;
-bool manualOverride = false;
-float smoothedDist = 100.0;
-float targetVx = 0.0, targetVy = 0.0, targetOmega = 0.0;
 
-// 4. MOTOR CONTROL
-void setMotor(int m1, int m2, int m3) {
-    // M1 (Kiri)
-    if (m1 == 0) {
-        digitalWrite(IN1_M1, LOW);
-        digitalWrite(IN2_M1, LOW);
-    } else {
-        digitalWrite(IN1_M1, m1 >= 0 ? HIGH : LOW);
-        digitalWrite(IN2_M1, m1 >= 0 ? LOW : HIGH);
-    }
-    ledcWrite(chanM1, abs(m1));
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Menghubungkan ke Wi-Fi: ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
 
-    // M2 (Kanan)
-    if (m2 == 0) {
-        digitalWrite(IN1_M2, LOW);
-        digitalWrite(IN2_M2, LOW);
-    } else {
-        digitalWrite(IN1_M2, m2 >= 0 ? HIGH : LOW);
-        digitalWrite(IN2_M2, m2 >= 0 ? LOW : HIGH);
-    }
-    ledcWrite(chanM2, abs(m2));
-
-    // M3 (Belakang)
-    if (m3 == 0) {
-        digitalWrite(IN1_M3, LOW);
-        digitalWrite(IN2_M3, LOW);
-    } else {
-        digitalWrite(IN1_M3, m3 >= 0 ? HIGH : LOW);
-        digitalWrite(IN2_M3, m3 >= 0 ? LOW : HIGH);
-    }
-    ledcWrite(chanM3, abs(m3));
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n[WIFI] TERHUBUNG!");
+  Serial.print("[WIFI] IP: ");
+  Serial.println(WiFi.localIP());
 }
 
-void kinematikaOmni(float vx, float vy, float omega = 0.0) {
-    // Kinematika 3 roda omni 120 derajat + rotasi
-    // Konfigurasi: M1=150° (kiri-depan), M2=30° (kanan-depan), M3=270° (belakang tegak lurus)
-    // omega: positif = CW, negatif = CCW (range -1.0 s/d 1.0)
-    float v1 = (-1.0 * vx) + (0.866 * vy) + omega; // Kiri (150°)
-    float v2 = (-1.0 * vx) - (0.866 * vy) + omega; // Kanan (30°)
-    float v3 = vx + omega;                         // Belakang (270°)
+void gerakDariVector(float vx, float vy) {
+  if (abs(vx) < 0.1 && abs(vy) < 0.1) { berhenti(); return; }
+  if (abs(vy) > abs(vx)) {
+    if (vy < 0) {
+      if (vx > 0.3) serongKananDepan();
+      else if (vx < -0.3) serongKiriDepan();
+      else maju();
+    } else {
+      if (vx > 0.3) serongKananBelakang();
+      else if (vx < -0.3) serongKiriBelakang();
+      else mundur();
+    }
+  } else {
+    if (vx > 0) {
+      if (vy < -0.3) serongKananDepan();
+      else if (vy > 0.3) serongKananBelakang();
+      else geserKanan();
+    } else {
+      if (vy < -0.3) serongKiriDepan();
+      else if (vy > 0.3) serongKiriBelakang();
+      else geserKiri();
+    }
+  }
+  lastCmdTime = millis();
+}
 
-    int s1 = constrain(v1 * 255, -255, 255);
-    int s2 = constrain(v2 * 255, -255, 255);
-    int s3 = constrain(v3 * 255, -255, 255);
+void callback(char* topic, byte* message, unsigned int length) {
+  String payload;
+  for (int i = 0; i < length; i++) {
+    payload += (char)message[i];
+  }
+  
+  Serial.print("[MQTT] Topik: "); Serial.print(topic);
+  Serial.print(" | Pesan: "); Serial.println(payload);
 
-    setMotor(s1, s2, s3);
+  if (String(topic) == topic_gerak) {
+    Serial.print("[GERAK] Perintah teks: "); Serial.println(payload);
+    if (payload == "maju") { maju(); }
+    else if (payload == "mundur") { mundur(); }
+    else if (payload == "geserKanan") { geserKanan(); }
+    else if (payload == "geserKiri") { geserKiri(); }
+    else if (payload == "serongKiriDepan") { serongKiriDepan(); }
+    else if (payload == "serongKananDepan") { serongKananDepan(); }
+    else if (payload == "serongKiriBelakang") { serongKiriBelakang(); }
+    else if (payload == "serongKananBelakang") { serongKananBelakang(); }
+    else if (payload == "putarKanan") { putarKanan(); }
+    else if (payload == "putarKiri") { putarKiri(); }
+    else if (payload == "berhenti") { berhenti(); }
+    else { Serial.print("[GERAK] Perintah tidak dikenal: "); Serial.println(payload); }
+  }
+  else if (String(topic) == topic_gerak_vector) {
+    int comma1 = payload.indexOf(',');
+    if (comma1 > 0) {
+      float vx = payload.substring(0, comma1).toFloat();
+      float vy = payload.substring(comma1 + 1).toFloat();
+      Serial.print("[VECTOR] vx="); Serial.print(vx); Serial.print(" vy="); Serial.println(vy);
+      gerakDariVector(vx, vy);
+    } else {
+      Serial.println("[VECTOR] Format salah — tidak ada koma");
+    }
+  }
+  else if (String(topic) == topic_gerak_rotate) {
+    float omega = payload.toFloat();
+    Serial.print("[ROTATE] omega="); Serial.println(omega);
+    if (omega > 0.1) putarKanan();
+    else if (omega < -0.1) putarKiri();
+    else berhenti();
     lastCmdTime = millis();
+  }
+  else if (String(topic) == topic_tendang) {
+    Serial.print("[TENDANG] Payload: "); Serial.println(payload);
+    if (payload == "tendang" && !sedangMenendang) {
+      sedangMenendang = true;
+      waktuMulaiTendang = millis();
+      digitalWrite(pinSolenoid, LOW); 
+      Serial.println("[TENDANG] EKSEKUSI!");
+    } else if (sedangMenendang) {
+      Serial.println("[TENDANG] DITOLAK — sudah menendang");
+    } else {
+      Serial.println("[TENDANG] DITOLAK — payload bukan 'tendang'");
+    }
+  }
+  else {
+    int newSpeed = payload.toInt();
+    if (newSpeed >= 0 && newSpeed <= 255) {
+      if (String(topic) == topic_speed_L) { speedL = newSpeed; Serial.print("[SPEED] L="); Serial.println(speedL); } 
+      else if (String(topic) == topic_speed_R) { speedR = newSpeed; Serial.print("[SPEED] R="); Serial.println(speedR); } 
+      else if (String(topic) == topic_speed_B) { speedB = newSpeed; Serial.print("[SPEED] B="); Serial.println(speedB); } 
+      else if (String(topic) == topic_kecepatan) { speedL = speedR = speedB = newSpeed; Serial.print("[SPEED] ALL="); Serial.println(newSpeed); }
+    } else {
+      Serial.print("[SPEED] Nilai tidak valid: "); Serial.println(newSpeed);
+    }
+  }
 }
 
-// 5. CALLBACK (MQTT HANDLING)
-void callback(char* topic, byte* payload, unsigned int length) {
-    String msg = "";
-    for (int i = 0; i < length; i++) msg += (char)payload[i];
-
-    if (strcmp(topic, topic_drive_vector) == 0) {
-        int comma1 = msg.indexOf(',');
-        if (comma1 > 0) {
-            float vx = msg.substring(0, comma1).toFloat();
-            int comma2 = msg.indexOf(',', comma1 + 1);
-            float vy = msg.substring(comma1 + 1, comma2 > 0 ? comma2 : msg.length()).toFloat();
-            float omega = (comma2 > 0) ? msg.substring(comma2 + 1).toFloat() : 0.0;
-            targetVx = vx; targetVy = vy; targetOmega = omega;
-            kinematikaOmni(targetVx, targetVy, targetOmega);
-            lastCmdTime = millis();
-        }
-    }
-    else if (strcmp(topic, topic_drive_rotate) == 0) {
-        targetOmega = msg.toFloat();
-        kinematikaOmni(targetVx, targetVy, targetOmega);
-        lastCmdTime = millis();
-    }
-    else if (strcmp(topic, topic_action_kick) == 0 && msg == "KICK") {
-        if (capitanTerbuka) { // Safety: Kick only if open
-            digitalWrite(KICK_PIN, HIGH);
-            delay(100);
-            digitalWrite(KICK_PIN, LOW);
-            Serial.println("[ACTION] Kick Fired!");
-        }
-    }
-    else if (strcmp(topic, topic_action_dribble) == 0) {
-        if (msg == "LOCK") {
-            manualOverride = true;
-            servoKiri.write(90); servoKanan.write(90);
-            capitanTerbuka = false;
-        } else if (msg == "RELEASE") {
-            manualOverride = true;
-            servoKiri.write(0); servoKanan.write(180);
-            capitanTerbuka = true;
-        } else if (msg == "AUTO") {
-            manualOverride = false;
-        }
-    }
-}
-
-// 6. SETUP & RECONNECT
 void reconnect() {
-    while (!client.connected()) {
-        Serial.print("[MQTT] Reconnecting...");
-        String id = "KRSBI-"; id += String(random(0xffff), HEX);
-        if (client.connect(id.c_str())) {
-            Serial.println("CONNECTED");
-            client.subscribe(topic_drive_vector);
-            client.subscribe(topic_drive_rotate);
-            client.subscribe(topic_action_kick);
-            client.subscribe(topic_action_dribble);
-        } else {
-            Serial.print("FAILED ("); Serial.print(client.state()); Serial.println(") retry in 5s");
-            delay(5000);
-        }
+  while (!client.connected()) {
+    Serial.print("Mencoba terhubung ke Broker MQTT...");
+    String clientId = "NagaHitam-KRSBI-";
+    clientId += String(random(0xffff), HEX);
+    
+    if (client.connect(clientId.c_str())) {
+      Serial.println("[MQTT] TERHUBUNG ke broker!");
+      client.subscribe(topic_gerak);
+      client.subscribe(topic_gerak_vector);
+      client.subscribe(topic_gerak_rotate);
+      client.subscribe(topic_tendang); 
+      client.subscribe(topic_kecepatan);
+      client.subscribe(topic_speed_L);
+      client.subscribe(topic_speed_R);
+      client.subscribe(topic_speed_B);
+    } else {
+      Serial.print("[MQTT] Gagal konek, rc=");
+      Serial.print(client.state());
+      Serial.println(" — retry 5 detik");
+      delay(5000);
     }
+  }
+}
+
+long getJarak() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  
+  long duration = pulseIn(echoPin, HIGH);
+  long distance = duration * 0.034 / 2;
+  return distance;
 }
 
 void setup() {
-    Serial.begin(115200);
+  Serial.begin(115200);
 
-    // Pin Modes
-    pinMode(IN1_M1, OUTPUT); pinMode(IN2_M1, OUTPUT);
-    pinMode(IN1_M2, OUTPUT); pinMode(IN2_M2, OUTPUT);
-    pinMode(IN1_M3, OUTPUT); pinMode(IN2_M3, OUTPUT);
-    pinMode(KICK_PIN, OUTPUT);
-    pinMode(TRIG_PIN, OUTPUT);
-    pinMode(ECHO_PIN, INPUT);
+  digitalWrite(pinSolenoid, HIGH); 
+  pinMode(pinSolenoid, OUTPUT);
 
-    // LEDC (PWM) Setup
-    ledcSetup(chanM1, freq, res); ledcAttachPin(ENA_M1, chanM1);
-    ledcSetup(chanM2, freq, res); ledcAttachPin(ENA_M2, chanM2);
-    ledcSetup(chanM3, freq, res); ledcAttachPin(ENA_M3, chanM3);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
 
-    // Servo Setup
-    ESP32PWM::allocateTimer(0);
-    servoKiri.setPeriodHertz(50);
-    servoKanan.setPeriodHertz(50);
-    servoKiri.attach(SERVO_KIRI_PIN, 500, 2400);
-    servoKanan.attach(SERVO_KANAN_PIN, 500, 2400);
+  pinMode(IN1_B, OUTPUT); pinMode(IN2_B, OUTPUT);
+  pinMode(IN1_L, OUTPUT); pinMode(IN2_L, OUTPUT);
+  pinMode(IN1_R, OUTPUT); pinMode(IN2_R, OUTPUT);
 
-    // Initial State
-    setMotor(0, 0, 0);
-    digitalWrite(KICK_PIN, LOW);
-    servoKiri.write(0); servoKanan.write(180);
+  ledcSetup(chanB, freq, resolution); ledcAttachPin(ENA_B, chanB);
+  ledcSetup(chanL, freq, resolution); ledcAttachPin(ENA_L, chanL);
+  ledcSetup(chanR, freq, resolution); ledcAttachPin(ENA_R, chanR);
 
-    // Networking
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
-    Serial.println("\n[WIFI] Connected");
-
-    client.setServer(mqtt_server, mqtt_port);
-    client.setCallback(callback);
+  Serial.println("[BOOT] Firmware PRODUCTION v1.0");
+  berhenti(); 
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
 }
 
-// 7. LOOP
 void loop() {
-    if (!client.connected()) reconnect();
-    client.loop();
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop(); 
 
-    // 1. Safety Watchdog (Auto-stop both if MQTT lost)
-    if (millis() - lastCmdTime > 1000) {
-        targetVx = 0; targetVy = 0; targetOmega = 0;
-        setMotor(0, 0, 0);
-    }
+  unsigned long now = millis();
 
-    // 2. Telemetry & Auto-Capitan Logic (10Hz)
-    if (millis() - lastTeleTime > 100) {
-        lastTeleTime = millis();
+  if (now - lastJarakTime > 500) {
+    lastJarakTime = now;
+    long jarak = getJarak();
+    client.publish(topic_jarak, String(jarak).c_str());
+  }
 
-        // Distance Smoothing
-        digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
-        digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
-        digitalWrite(TRIG_PIN, LOW);
-        long duration = pulseIn(ECHO_PIN, HIGH, 30000);
-        float currentDist = (duration == 0) ? 99.0 : duration * 0.034 / 2;
-        smoothedDist = (smoothedDist * 0.7) + (currentDist * 0.3);
+  if (sedangMenendang && (now - waktuMulaiTendang >= durasiTendang)) {
+    digitalWrite(pinSolenoid, HIGH); 
+    sedangMenendang = false;
+    Serial.println("=> Tuas ditarik");
+  }
 
-        // Auto-Capitan
-        if (!manualOverride) {
-            if (smoothedDist < 12.0) {
-                servoKiri.write(90); servoKanan.write(90);
-                capitanTerbuka = false;
-            } else {
-                servoKiri.write(0); servoKanan.write(180);
-                capitanTerbuka = true;
-            }
-        }
+  // Safety watchdog: auto-stop if no command for 1s
+  if (lastCmdTime > 0 && millis() - lastCmdTime > 1000) {
+    Serial.println("[WATCHDOG] Stop — tidak ada perintah >1 detik");
+    berhenti();
+    lastCmdTime = millis();
+  }
+}
 
-        // Send Distance to UI
-        char buf[8]; dtostrf(smoothedDist, 4, 2, buf);
-        client.publish(topic_status_ultrasonic, buf);
+void logMotor() {
+  Serial.print("[MOTOR] L="); Serial.print(speedL);
+  Serial.print(" R="); Serial.print(speedR);
+  Serial.print(" B="); Serial.println(speedB);
+}
 
-        // --- TAMBAHAN LOG UNTUK PLATFORMIO ---
-        Serial.print("[SENSOR] Jarak Mentah: ");
-        Serial.print(currentDist);
-        Serial.print(" cm | Jarak Halus (Smoothed): ");
-        Serial.println(smoothedDist);
-    }
+void maju() { 
+  digitalWrite(IN1_L, HIGH); digitalWrite(IN2_L, LOW);  ledcWrite(chanL, speedL);
+  digitalWrite(IN1_R, HIGH); digitalWrite(IN2_R, LOW);  ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, LOW);  ledcWrite(chanB, 0);
+  Serial.print("[AKSI] maju → "); logMotor();
+}
+void mundur() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, HIGH); ledcWrite(chanL, speedL);
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, HIGH); ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, LOW);  ledcWrite(chanB, 0);
+  Serial.print("[AKSI] mundur → "); logMotor();
+}
+void serongKiriDepan() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, LOW);  ledcWrite(chanL, 0); 
+  digitalWrite(IN1_R, HIGH); digitalWrite(IN2_R, LOW);  ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, HIGH); digitalWrite(IN2_B, LOW);  ledcWrite(chanB, speedB);
+  Serial.print("[AKSI] serongKiriDepan → "); logMotor();
+}
+void serongKananBelakang() { 
+  digitalWrite(IN1_L, HIGH); digitalWrite(IN2_L, LOW);  ledcWrite(chanL, speedL); 
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, LOW);  ledcWrite(chanR, 0); 
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, HIGH); ledcWrite(chanB, speedB);
+  Serial.print("[AKSI] serongKananBelakang → "); logMotor();
+}
+void serongKananDepan() { 
+  digitalWrite(IN1_L, HIGH); digitalWrite(IN2_L, LOW);  ledcWrite(chanL, speedL); 
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, LOW);  ledcWrite(chanR, 0); 
+  digitalWrite(IN1_B, HIGH); digitalWrite(IN2_B, LOW);  ledcWrite(chanB, speedB);
+  Serial.print("[AKSI] serongKananDepan → "); logMotor();
+}
+void serongKiriBelakang() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, LOW);  ledcWrite(chanL, 0); 
+  digitalWrite(IN1_R, HIGH); digitalWrite(IN2_R, LOW);  ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, HIGH); ledcWrite(chanB, speedB);
+  Serial.print("[AKSI] serongKiriBelakang → "); logMotor();
+}
+void putarKanan() { 
+  digitalWrite(IN1_L, HIGH); digitalWrite(IN2_L, LOW);  ledcWrite(chanL, speedL); 
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, HIGH); ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, HIGH); digitalWrite(IN2_B, LOW);  ledcWrite(chanB, speedB);
+  Serial.print("[AKSI] putarKanan → "); logMotor();
+}
+void putarKiri() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, HIGH); ledcWrite(chanL, speedL); 
+  digitalWrite(IN1_R, HIGH); digitalWrite(IN2_R, LOW);  ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, HIGH); ledcWrite(chanB, speedB);
+  Serial.print("[AKSI] putarKiri → "); logMotor();
+}
+void geserKanan() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, LOW);  ledcWrite(chanL, 0); 
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, HIGH); ledcWrite(chanR, speedR);   
+  digitalWrite(IN1_B, HIGH); digitalWrite(IN2_B, LOW);  ledcWrite(chanB, speedB);
+  Serial.print("[AKSI] geserKanan → "); logMotor();
+}
+void geserKiri() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, HIGH); ledcWrite(chanL, speedL);   
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, LOW);  ledcWrite(chanR, 0);
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, HIGH); ledcWrite(chanB, speedB);
+  Serial.print("[AKSI] geserKiri → "); logMotor();
+}
+void berhenti() {
+  digitalWrite(IN1_L, LOW); digitalWrite(IN2_L, LOW); ledcWrite(chanL, 0);
+  digitalWrite(IN1_R, LOW); digitalWrite(IN2_R, LOW); ledcWrite(chanR, 0);
+  digitalWrite(IN1_B, LOW); digitalWrite(IN2_B, LOW); ledcWrite(chanB, 0);
+  Serial.println("[AKSI] berhenti");
 }
