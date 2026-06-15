@@ -1,0 +1,231 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+// ===== Konfigurasi MQTT (sama dengan main.cpp) =====
+const char* ssid = "neo8";         
+const char* password = "asd123123"; 
+const char* mqtt_server = "broker.hivemq.com";
+const int mqtt_port = 1883;
+
+// Topic (sama dengan main.cpp)
+const char* topic_drive_vector = "robot/drive/vector";
+const char* topic_drive_rotate = "robot/drive/rotate";
+const char* topic_action_kick = "robot/action/kick";
+const char* topic_status_ultrasonic = "robot/status/ultrasonic";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// Pin (sesuai hardware teman)
+const int ENA_B = 13; const int IN1_B = 14; const int IN2_B = 12; 
+const int ENA_L = 25; const int IN1_L = 26; const int IN2_L = 27; 
+const int ENA_R = 4;  const int IN1_R = 15; const int IN2_R = 2; 
+
+const int trigPin = 18;
+const int echoPin = 19;
+const int pinSolenoid = 23; 
+
+int speedL = 255; 
+int speedR = 255; 
+int speedB = 255; 
+const int freq = 30000;
+const int resolution = 8;
+const int chanL = 0;
+const int chanR = 1;
+const int chanB = 2;
+
+unsigned long lastJarakTime = 0;
+unsigned long lastCmdTime = 0;
+
+bool sedangMenendang = false;
+unsigned long waktuMulaiTendang = 0;
+const int durasiTendang = 500; 
+
+// ===== Motor Control Functions (milik teman) =====
+void maju() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, HIGH); ledcWrite(chanL, speedL);
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, HIGH); ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, LOW);  ledcWrite(chanB, 0); 
+}
+void mundur() { 
+  digitalWrite(IN1_L, HIGH); digitalWrite(IN2_L, LOW);  ledcWrite(chanL, speedL);
+  digitalWrite(IN1_R, HIGH); digitalWrite(IN2_R, LOW);  ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, LOW);  ledcWrite(chanB, 0); 
+}
+void serongKiriDepan() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, LOW);  ledcWrite(chanL, 0); 
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, HIGH); ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, HIGH); digitalWrite(IN2_B, LOW);  ledcWrite(chanB, speedB);
+}
+void serongKananBelakang() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, LOW);  ledcWrite(chanL, 0); 
+  digitalWrite(IN1_R, HIGH); digitalWrite(IN2_R, LOW);  ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, HIGH); ledcWrite(chanB, speedB);
+}
+void serongKananDepan() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, HIGH); ledcWrite(chanL, speedL); 
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, LOW);  ledcWrite(chanR, 0); 
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, HIGH); ledcWrite(chanB, speedB);
+}
+void serongKiriBelakang() { 
+  digitalWrite(IN1_L, HIGH); digitalWrite(IN2_L, LOW);  ledcWrite(chanL, speedL); 
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, LOW);  ledcWrite(chanR, 0); 
+  digitalWrite(IN1_B, HIGH); digitalWrite(IN2_B, LOW);  ledcWrite(chanB, speedB);
+}
+void putarKanan() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, HIGH); ledcWrite(chanL, speedL); 
+  digitalWrite(IN1_R, HIGH); digitalWrite(IN2_R, LOW);  ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, HIGH); digitalWrite(IN2_B, LOW);  ledcWrite(chanB, speedB);
+}
+void putarKiri() { 
+  digitalWrite(IN1_L, HIGH); digitalWrite(IN2_L, LOW);  ledcWrite(chanL, speedL); 
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, HIGH); ledcWrite(chanR, speedR); 
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, HIGH); ledcWrite(chanB, speedB);
+}
+void geserKanan() { 
+  digitalWrite(IN1_L, LOW);  digitalWrite(IN2_L, HIGH); ledcWrite(chanL, speedL / 2);   
+  digitalWrite(IN1_R, HIGH); digitalWrite(IN2_R, LOW);  ledcWrite(chanR, speedR / 2);   
+  digitalWrite(IN1_B, LOW);  digitalWrite(IN2_B, HIGH); ledcWrite(chanB, speedB); 
+}
+void geserKiri() { 
+  digitalWrite(IN1_L, HIGH); digitalWrite(IN2_L, LOW);  ledcWrite(chanL, speedL / 2);   
+  digitalWrite(IN1_R, LOW);  digitalWrite(IN2_R, HIGH); ledcWrite(chanR, speedR / 2);   
+  digitalWrite(IN1_B, HIGH); digitalWrite(IN2_B, LOW);  ledcWrite(chanB, speedB); 
+}
+void berhenti() {
+  digitalWrite(IN1_L, LOW); digitalWrite(IN2_L, LOW); ledcWrite(chanL, 0);
+  digitalWrite(IN1_R, LOW); digitalWrite(IN2_R, LOW); ledcWrite(chanR, 0);
+  digitalWrite(IN1_B, LOW); digitalWrite(IN2_B, LOW); ledcWrite(chanB, 0);
+}
+
+// ===== Map vx,vy ke fungsi gerak (sama konvensi dengan main.cpp) =====
+// Firmware: vy negatif = maju (North), vy positif = mundur (South)
+void gerakDariVector(float vx, float vy) {
+  if (abs(vx) < 0.1 && abs(vy) < 0.1) { berhenti(); return; }
+
+  // Prioritaskan arah dominan
+  if (abs(vy) > abs(vx)) {
+    // Dominan maju/mundur
+    if (vy < 0) {
+      if (vx > 0.3) serongKananDepan();
+      else if (vx < -0.3) serongKiriDepan();
+      else maju();
+    } else {
+      if (vx > 0.3) serongKananBelakang();
+      else if (vx < -0.3) serongKiriBelakang();
+      else mundur();
+    }
+  } else {
+    // Dominan kanan/kiri
+    if (vx > 0) {
+      if (vy < -0.3) serongKananDepan();
+      else if (vy > 0.3) serongKananBelakang();
+      else geserKanan();
+    } else {
+      if (vy < -0.3) serongKiriDepan();
+      else if (vy > 0.3) serongKiriBelakang();
+      else geserKiri();
+    }
+  }
+  lastCmdTime = millis();
+}
+
+// ===== CALLBACK MQTT =====
+void callback(char* topic, byte* message, unsigned int length) {
+  String payload;
+  for (int i = 0; i < length; i++) payload += (char)message[i];
+
+  if (strcmp(topic, topic_drive_vector) == 0) {
+    int comma1 = payload.indexOf(',');
+    if (comma1 > 0) {
+      float vx = payload.substring(0, comma1).toFloat();
+      int comma2 = payload.indexOf(',', comma1 + 1);
+      float vy = payload.substring(comma1 + 1, comma2 > 0 ? comma2 : payload.length()).toFloat();
+      gerakDariVector(vx, vy);
+    }
+  }
+  else if (strcmp(topic, topic_drive_rotate) == 0) {
+    float omega = payload.toFloat();
+    if (omega > 0.1) putarKanan();
+    else if (omega < -0.1) putarKiri();
+    else berhenti();
+    lastCmdTime = millis();
+  }
+  else if (strcmp(topic, topic_action_kick) == 0) {
+    if (payload == "KICK" && !sedangMenendang) {
+      sedangMenendang = true;
+      waktuMulaiTendang = millis();
+      digitalWrite(pinSolenoid, LOW);
+    }
+  }
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("MQTT reconnecting...");
+    String clientId = "KRSBI-"; clientId += String(random(0xffff), HEX);
+    if (client.connect(clientId.c_str())) {
+      Serial.println("CONNECTED");
+      client.subscribe(topic_drive_vector);
+      client.subscribe(topic_drive_rotate);
+      client.subscribe(topic_action_kick);
+    } else {
+      Serial.print("FAILED (rc="); Serial.print(client.state()); Serial.println(") retry 5s");
+      delay(5000);
+    }
+  }
+}
+
+long getJarak() {
+  digitalWrite(trigPin, LOW); delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH); delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  long duration = pulseIn(echoPin, HIGH);
+  return duration * 0.034 / 2;
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(trigPin, OUTPUT); pinMode(echoPin, INPUT);
+  pinMode(pinSolenoid, OUTPUT);
+  digitalWrite(pinSolenoid, HIGH);
+  pinMode(IN1_B, OUTPUT); pinMode(IN2_B, OUTPUT);
+  pinMode(IN1_L, OUTPUT); pinMode(IN2_L, OUTPUT);
+  pinMode(IN1_R, OUTPUT); pinMode(IN2_R, OUTPUT);
+
+  ledcSetup(chanB, freq, resolution); ledcAttachPin(ENA_B, chanB);
+  ledcSetup(chanL, freq, resolution); ledcAttachPin(ENA_L, chanL);
+  ledcSetup(chanR, freq, resolution); ledcAttachPin(ENA_R, chanR);
+
+  berhenti();
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.println("\nWiFi Connected");
+
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+}
+
+void loop() {
+  if (!client.connected()) reconnect();
+  client.loop();
+
+  // Safety watchdog (1 detik tanpa perintah → berhenti)
+  if (millis() - lastCmdTime > 1000) berhenti();
+
+  // Ultrasonic telemetry 10Hz
+  if (millis() - lastJarakTime > 100) {
+    lastJarakTime = millis();
+    long jarak = getJarak();
+    client.publish(topic_status_ultrasonic, String(jarak).c_str());
+  }
+
+  // Kick solenoid timing
+  if (sedangMenendang && (millis() - waktuMulaiTendang >= durasiTendang)) {
+    digitalWrite(pinSolenoid, HIGH);
+    sedangMenendang = false;
+  }
+}

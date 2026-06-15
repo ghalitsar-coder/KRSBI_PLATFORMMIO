@@ -1,0 +1,50 @@
+#include <Arduino.h>
+
+// Pin yang dihubungkan ke Gate MOSFET untuk Solenoid
+const int SOLENOID_PIN = 17;
+
+void setup() {
+    Serial.begin(115200);
+    
+    // Konfigurasi pin sebagai output
+    pinMode(SOLENOID_PIN, OUTPUT);
+    
+    // Pastikan solenoid dalam keadaan mati (LOW) saat pertama kali nyala
+    digitalWrite(SOLENOID_PIN, LOW);
+    
+    Serial.println("========================================");
+    Serial.println("        TES SOLENOID (MOSFET)           ");
+    Serial.println("========================================");
+    Serial.println("Ketik 'K' lalu Enter di Serial Monitor untuk trigger solenoid.");
+}
+
+void loop() {
+    // Cek apakah ada input dari Serial Monitor
+    if (Serial.available() > 0) {
+        char input = Serial.read();
+        
+        // Mengabaikan karakter newline/carriage return
+        if (input == '\n' || input == '\r') {
+            return;
+        }
+
+        // Jika user mengetik 'K' atau 'k'
+        if (input == 'K' || input == 'k') {
+            Serial.println("TRIGGER! Solenoid ON (HIGH)");
+            
+            // Nyalakan mosfet/solenoid
+            digitalWrite(SOLENOID_PIN, HIGH);
+            
+            // Waktu nyala solenoid (dalam milidetik). 
+            // 100ms biasanya cukup untuk menendang, jangan terlalu lama agar mosfet/solenoid tidak panas.
+            delay(100); 
+            
+            // Matikan mosfet/solenoid
+            digitalWrite(SOLENOID_PIN, LOW);
+            
+            Serial.println("Solenoid OFF (LOW). Menunggu perintah selanjutnya...");
+        } else {
+            Serial.println("Perintah tidak dikenal. Ketik 'K' untuk trigger.");
+        }
+    }
+}
